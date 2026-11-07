@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Generate the ANSI test cases.
+
+By default, write one line per case (raw bytes) to stdout, so that
+"/exec -norc /path/to/ansigen" in WeeChat shows them. Cases that cannot run
+on the gui path (NUL, LF, invalid UTF-8, ...) are left out.
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ansitest import registry  # noqa: E402
+from ansitest.cases.terminfo import DEFAULT_TERMS  # noqa: E402
+from ansitest.model import describe, path_skip  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--eyeball", action="store_true",
+                        help="print a description and the expected attributes before each case")
+    parser.add_argument("--manifest", metavar="FILE",
+                        help="also write all selected cases as JSON lines to FILE")
+    parser.add_argument("--list", action="store_true",
+                        help="list the cases (ID, key, skip reason) instead of writing them")
+    parser.add_argument("--filter", metavar="REGEX",
+                        help="select cases whose '<id> <source> <key> <desc>' matches REGEX")
+    parser.add_argument("--term", action="append", metavar="TERM",
+                        help="TERM for terminfo cases, repeatable (default: %s)"
+                        % ", ".join(DEFAULT_TERMS))
+    parser.add_argument("--corpora", metavar="DIR", default=str(registry.DEFAULT_CORPORA),
+                        help="directory of the corpora (default: %(default)s)")
+    args = parser.parse_args()
+
+    cases = registry.select(registry.all_cases(terms=args.term, corpora=Path(args.corpora)),
+                            args.filter)
+    if args.manifest:
+        with open(args.manifest, "w", encoding="utf-8") as manifest:
+            for case in cases:
+                manifest.write(json.dumps(case.to_json()) + "\n")
+    out = sys.stdout.buffer
+    for case in cases:
+        reason = path_skip(case, "gui")
+        if args.list:
+            suffix = f"  [skip: {reason}]" if reason else ""
+            out.write(f"{case.id} {case.key}{suffix}\n".encode("utf-8", "backslashreplace"))
+        elif args.eyeball:
+            out.write(f"# {case.id} {case.key}: {case.desc}\n".encode("utf-8", "backslashreplace"))
+            if reason:
+                out.write(f"#   skipped: {reason}\n".encode())
+                continue
+            expect = " | ".join(f"{text} {describe(state)}" for text, state in case.expect)
+            out.write(f"#   expect: {expect}\n".encode("utf-8", "backslashreplace"))
+            out.write(case.line() + b"\n")
+        elif not reason:
+            out.write(case.line() + b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,8 @@
+corpora/
+__pycache__/
+*.pyc
+results-*.txt
+/weechat/
+/weechat-fix-ansi-colors/
+/main.json
+/branch.json

@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Run the ANSI test cases through WeeChat's /exec and check the decoded colors."""
+
+import argparse
+import re
+import json
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ansitest import registry  # noqa: E402
+from ansitest.capture.display import run_display  # noqa: E402
+from ansitest.capture.run import run_gui, run_irc, run_print  # noqa: E402
+from ansitest.capture.weechat import (MIN_VERSION, WeeChat, WeeChatError,  # noqa: E402
+                                      binary_for_build, version)
+from ansitest.check import evaluate  # noqa: E402
+from ansitest.model import BYTE_PATHS, GUI_PATHS, PATHS, path_skip  # noqa: E402
+from ansitest.report import report  # noqa: E402
+
+
+def curses_binary_for(headless: str) -> str | None:
+    """The curses weechat next to a weechat-headless binary (build tree:
+    src/gui/curses/normal/weechat; installed: weechat), None if not found."""
+    path = Path(headless)
+    for candidate in (path.parent.parent / "normal" / "weechat", path.parent / "weechat"):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--weechat", metavar="BIN",
+                       help="weechat-headless binary (default: weechat-headless in PATH)")
+    group.add_argument("--build", metavar="DIR", help="WeeChat build directory")
+    parser.add_argument("--path", choices=("all", *PATHS), default="all",
+                        help="gui: raw WeeChat codes of the buffer line (needs the trigger plugin); "
+                        "gui-ansi: the line through the logger (ANSI); irc: /exec -o; "
+                        "gui-strip, irc-strip: /exec -color strip; gui-keep, irc-keep: "
+                        "/exec -color ansi; print: /print cases through the logger; display, display-headless: "
+                        "screen of a curses WeeChat in tmux vs logger (default: all)")
+    parser.add_argument("--filter", metavar="REGEX",
+                        help="select cases whose '<id> <source> <key> <desc>' matches REGEX, and show "
+                        "the input, expected and got of each one (not only of failures)")
+    parser.add_argument("--term", action="append", metavar="TERM",
+                        help="TERM for terminfo cases, repeatable")
+    parser.add_argument("--corpora", metavar="DIR", default=str(registry.DEFAULT_CORPORA))
+    parser.add_argument("--verbose", action="store_true",
+                        help="list every diverging and skipped case")
+    parser.add_argument("--keep", action="store_true", help="keep WeeChat's directory")
+    parser.add_argument("--json", metavar="FILE",
+                        help="also write the result of every case and path as JSON to FILE")
+    args = parser.parse_args()
+
+    if args.build:
+        binary, libdir = binary_for_build(args.build)
+    else:
+        binary, libdir = args.weechat or shutil.which("weechat-headless"), None
+    if not binary:
+        parser.error("weechat-headless not found: use --weechat or --build")
+    try:
+        version_string, version_number = version(binary)
+        if version_number < MIN_VERSION:
+            parser.error(f"WeeChat {version_string}: {MIN_VERSION[0]}.{MIN_VERSION[1]} "
+                         "or later is required")
+        print(f"WeeChat {version_string} ({binary})", flush=True)
+
+        cases = registry.select(registry.all_cases(terms=args.term, corpora=Path(args.corpora)),
+                                args.filter)
+        paths = PATHS if args.path == "all" else (args.path,)
+        results = []
+        # One run per destination and value of -color: gui and gui-ansi share
+        # the run with -color auto.
+        runs = [("gui", "auto", [p for p in paths if p in GUI_PATHS]),
+                ("gui", "strip", [p for p in paths if p == "gui-strip"]),
+                ("gui", "ansi", [p for p in paths if p == "gui-keep"]),
+                ("irc", "auto", [p for p in paths if p == "irc"]),
+                ("irc", "strip", [p for p in paths if p == "irc-strip"]),
+                ("irc", "ansi", [p for p in paths if p == "irc-keep"])]
+        for target, color, run_paths in runs:
+            if not run_paths:
+                continue
+            runnable = [case for case in cases if path_skip(case, run_paths[0]) is None]
+            with WeeChat(binary, libdir, keep=args.keep) as weechat:
+                raw_paths = [p for p in run_paths if p != "gui-ansi" and target == "gui"]
+                if raw_paths and "trigger" not in weechat.plugins:
+                    if args.path in raw_paths:
+                        raise WeeChatError(f"the {args.path} path needs the trigger plugin")
+                    print(f"{', '.join(raw_paths)}: skipped, the trigger plugin is not loaded",
+                          flush=True)
+                    run_paths = [p for p in run_paths if p not in raw_paths]
+                    if not run_paths:
+                        continue
+                print(f"{', '.join(run_paths)}: running {len(runnable)} of {len(cases)} cases",
+                      flush=True)
+                if target == "gui":
+                    got = run_gui(weechat, runnable, raw="gui-ansi" not in run_paths
+                                  or "gui" in run_paths, color=color)
+                else:
+                    got = run_irc(weechat, runnable, version_number, color=color)
+            for path in run_paths:
+                if path in BYTE_PATHS:
+                    found = got["bytes"]
+                else:
+                    found = got[path]
+                results += [evaluate(case, path, found.get(case.id)) for case in cases]
+        if "display" in paths or "display-headless" in paths:
+            curses_binary = curses_binary_for(binary)
+            if not shutil.which("tmux") or not curses_binary:
+                reason = "tmux not found" if not shutil.which("tmux") else "no curses binary"
+                if args.path.startswith("display"):
+                    raise WeeChatError(f"the display paths need tmux and the curses weechat ({reason})")
+                print(f"display: skipped ({reason})", flush=True)
+            else:
+                pattern = re.compile(args.filter) if args.filter else None
+                display_results = run_display(
+                    curses_binary, binary if "display-headless" in paths else None, libdir,
+                    pattern, keep=args.keep)
+                results += [r for r in display_results if r.path in paths]
+        if "print" in paths:
+            print_cases = registry.select(registry.print_cases(), args.filter)
+            if print_cases:
+                print(f"print: running {len(print_cases)} cases", flush=True)
+                with WeeChat(binary, libdir, keep=args.keep) as weechat:
+                    got = run_print(weechat, print_cases)
+                results += [evaluate(case, "print", got.get(case.id)) for case in print_cases]
+    except WeeChatError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as output:
+            json.dump([{"key": r.case.key, "source": r.case.source, "path": r.path,
+                        "status": r.status, "detail": r.detail} for r in results],
+                      output, indent=0)
+    return 1 if report(results, sys.stdout, verbose=args.verbose, details=bool(args.filter)) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
