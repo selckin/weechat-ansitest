@@ -38,7 +38,8 @@ ncurses with its terminfo entries, and tmux for the display paths.
    git -C weechat worktree add ../weechat-fix-ansi-colors fix-ansi-colors
    ```
 
-2. Build both (only `weechat-headless` and the plugins the tests need):
+2. Build both (`weechat-headless` for the tests, the curses `weechat` for the display
+   paths and `./ansiview`, without the plugins the tests do not need):
 
    ```
    for dir in weechat weechat-fix-ansi-colors; do
@@ -117,12 +118,69 @@ ncurses with its terminfo entries, and tmux for the display paths.
    ```
 
    With `--filter`, every selected case is shown like this; without it, only
-   the failures are. The IRC side of the same bugs:
-   `--path irc`. To see the cases in a terminal and in WeeChat by eye:
-   `./ansigen --eyeball --filter "$F"` in a terminal, and
-   `/exec -norc /path/to/ansigen --eyeball --filter hw/sgr22` in WeeChat.
+   the failures are. The IRC side of the same bugs: `--path irc`.
 
-5. To find which commit of the branch fixes which case (it builds every commit
+5. See the cases in WeeChat itself, `main` and the branch side by side (needs
+   tmux):
+
+   ```
+   ./ansiview --filter "$F"
+   ```
+
+   This opens a tmux session in your terminal with the curses `weechat` of each
+   build in its own pane, labeled with the build and the commit it was built
+   from. Each WeeChat uses a temporary directory, so your configuration is not
+   touched, and runs `/exec -norc ansigen --eyeball --filter "$F"`. Before each
+   case, a comment line says what it should look like:
+
+   ```
+   # T07973 hw/sgr22-bold-dim: 22 removes bold and dim
+   #   expect: a1 bold dim | a2 (default)
+   T07973 a1a2
+   ```
+
+   The top of each WeeChat shows `/exec` (ANSI colors decoded to WeeChat colors);
+   the bottom shows `/exec -o` in the channel `#t` of a fake IRC server on
+   127.0.0.1 (the IRC colors WeeChat sent, as it shows its own messages). What you
+   type goes to both panes (tmux `synchronize-panes`), so PgUp/PgDn scrolls both
+   WeeChats together; `Ctrl-b :setw synchronize-panes off` turns that off. Without
+   `--filter`, the 139 hand-written cases are shown. Detach (`Ctrl-b d`) or quit
+   both WeeChats to end; everything is removed. Inside tmux, the session is nested:
+   press `Ctrl-b` twice to reach it. `--build DIR` (repeatable) picks other builds.
+
+   For pictures made of several lines, `--plain` leaves out the comment lines, for
+   example `img2txt` or `toilet` (keys in `./ansigen --list --filter prog/`):
+
+   ```
+   ./ansiview --plain --filter 'prog/img2txt-ansi-none-60-rainbow/'
+   ./ansiview --plain --filter 'prog/img2txt-utf8-fstein-60-bars/'
+   ./ansiview --plain --filter 'prog/toilet-irc-gay-future/'
+   ```
+
+   By hand, in a WeeChat you start yourself, with a temporary directory: `main`
+
+   ```
+   WEECHAT_EXTRA_LIBDIR=weechat/build/src weechat/build/src/gui/curses/normal/weechat --dir "$(mktemp -d)"
+   ```
+
+   and the branch (in another terminal):
+
+   ```
+   WEECHAT_EXTRA_LIBDIR=weechat-fix-ansi-colors/build/src weechat-fix-ansi-colors/build/src/gui/curses/normal/weechat --dir "$(mktemp -d)"
+   ```
+
+   then, in WeeChat (`/exec` runs in the directory WeeChat was started from, here
+   this repository):
+
+   ```
+   /exec -norc ./ansigen --eyeball --filter hw/sgr22
+   ```
+
+   `/exec -o` sends every line to the current channel: use it only on a test
+   server. In a terminal, `./ansigen --eyeball --filter "$F"` shows what a
+   terminal makes of the same cases.
+
+6. To find which commit of the branch fixes which case (it builds every commit
    in the worktree, and restores its checkout at the end):
 
    ```
@@ -314,6 +372,25 @@ Without options, it writes the case lines (raw bytes) to stdout.
 IDs (`T00001`, ...) depend on the TERMs and corpora present; keys
 (`hw/sgr21`, `ti/xterm-256color/setaf/196`, ...) are stable.
 
+### ansiview
+
+```
+./ansiview [--build DIR]... [--filter REGEX] [--term TERM]... [--plain] [--no-attach] [--keep]
+```
+
+Shows `ansigen --eyeball` in the curses `weechat` of each build, side by side
+in a new tmux session, with `/exec` at the top and `/exec -o` to a fake IRC
+server at the bottom (see "WeeChat main versus fix-ansi-colors", step 5).
+
+- `--build DIR`: a build directory, repeatable (default: `weechat/build` and
+  `weechat-fix-ansi-colors/build`, those that exist).
+- `--filter REGEX`: the cases to show (default: `hw/`).
+- `--plain`: only the case lines, without the comment lines (for pictures such
+  as `img2txt` output).
+- `--no-attach`: print the tmux command to attach instead of attaching, and
+  wait (Ctrl-C ends the view).
+- `--keep`: keep the WeeChat directories.
+
 ## Fixes on the branch
 
 `docs/fixes.md` lists every fix of the `fix-ansi-colors` branch: what it
@@ -358,6 +435,7 @@ and the irc path on a few cases, and the color tables.
 
 ```
 ansigen, ansicheck        command-line tools
+ansiview                  the cases in curses WeeChats side by side (tmux)
 fetch-corpora.sh          fetch the corpora pinned in corpora.lock
 tools/extract_tables.py   copy WeeChat's color tables
 tools/record_programs.py  record the output of real programs

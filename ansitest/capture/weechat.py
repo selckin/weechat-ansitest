@@ -35,6 +35,16 @@ def binary_for_build(build: str) -> tuple[str, str]:
             str(build_dir / "src"))
 
 
+def curses_binary_for(headless: str) -> str | None:
+    """The curses weechat next to a weechat-headless binary (build tree:
+    src/gui/curses/normal/weechat; installed: weechat), None if not found."""
+    path = Path(headless)
+    for candidate in (path.parent.parent / "normal" / "weechat", path.parent / "weechat"):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def version(binary: str) -> tuple[str, tuple[int, int]]:
     """Version string and (major, minor) of a WeeChat binary."""
     try:

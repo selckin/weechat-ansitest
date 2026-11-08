@@ -13,21 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ansitest import registry  # noqa: E402
 from ansitest.capture.display import run_display  # noqa: E402
 from ansitest.capture.run import run_gui, run_irc, run_print  # noqa: E402
-from ansitest.capture.weechat import (MIN_VERSION, WeeChat, WeeChatError,  # noqa: E402
+from ansitest.capture.weechat import (MIN_VERSION, WeeChat, WeeChatError, curses_binary_for,  # noqa: E402
                                       binary_for_build, version)
 from ansitest.check import evaluate  # noqa: E402
 from ansitest.model import BYTE_PATHS, GUI_PATHS, PATHS, path_skip  # noqa: E402
 from ansitest.report import report  # noqa: E402
-
-
-def curses_binary_for(headless: str) -> str | None:
-    """The curses weechat next to a weechat-headless binary (build tree:
-    src/gui/curses/normal/weechat; installed: weechat), None if not found."""
-    path = Path(headless)
-    for candidate in (path.parent.parent / "normal" / "weechat", path.parent / "weechat"):
-        if candidate.is_file():
-            return str(candidate)
-    return None
 
 
 def main() -> int:

@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Show the cases in the curses WeeChat of one or more builds, side by side.
+
+Each build's curses weechat runs in a pane of a new tmux session, with a
+temporary WeeChat directory (your configuration is not used), and runs
+"/exec -norc ansigen --eyeball --filter REGEX": before each case, a
+comment line says what it should look like. The window of each WeeChat is
+split: the top shows /exec (WeeChat colors in the buffer), the bottom
+shows /exec -o to a channel of a local fake IRC server (WeeChat's own
+messages, as decoded from the IRC colors it sent).
+
+Keys typed in one pane go to all of them (tmux synchronize-panes), so
+PgUp/PgDn or /window commands scroll every WeeChat together. Detaching
+(prefix d) or quitting every WeeChat ends the view and removes the
+temporary directories.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from ansitest.capture.ircd import FakeIrcd  # noqa: E402
+from ansitest.capture.weechat import (WeeChat, WeeChatError, binary_for_build,  # noqa: E402
+                                      curses_binary_for, version)
+
+DEFAULT_BUILDS = ("weechat/build", "weechat-fix-ansi-colors/build")
+DEFAULT_FILTER = "hw/"
+SESSION = "ansiview"
+END = "--- end of the cases ---"
+
+
+class Tmux:
+    """A tmux server of its own (no user configuration)."""
+
+    def __init__(self) -> None:
+        self.socket = f"ansiview-{os.getpid()}"
+
+    def __call__(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["tmux", "-L", self.socket, "-f", "/dev/null", *args],
+                              capture_output=True, text=True)
+
+    def alive(self) -> bool:
+        return self("has-session", "-t", SESSION).returncode == 0
+
+
+class PaneWeeChat(WeeChat):
+    """The curses WeeChat in a pane of the tmux session."""
+
+    def __init__(self, tmux: Tmux, binary: str, libdir: str, label: str, first: bool,
+                 size: tuple[int, int], keep: bool = False):
+        super().__init__(binary, libdir, keep)
+        self.tmux = tmux
+        self.label = label
+        self.first = first
+        self.size = size
+        self.pane = ""
+        self.pid = 0
+
+    def launch(self) -> None:
+        env = ["-e", "TERM=tmux-256color", "-e", f"WEECHAT_EXTRA_LIBDIR={self.extra_libdir}"]
+        command = shlex.join(self.command_line())
+        if self.first:
+            result = self.tmux("new-session", "-d", "-s", SESSION, "-x", str(self.size[0]),
+                               "-y", str(self.size[1]), "-P", "-F", "#{pane_id} #{pane_pid}",
+                               *env, "exec " + command)
+        else:
+            result = self.tmux("split-window", "-h", "-t", SESSION, "-P", "-F",
+                               "#{pane_id} #{pane_pid}", *env, "exec " + command)
+        if result.returncode != 0:
+            raise WeeChatError(f"tmux failed: {result.stderr.strip()}")
+        self.pane, pid = result.stdout.split()
+        self.pid = int(pid)
+        self.tmux("set-option", "-p", "-t", self.pane, "@label", self.label)
+
+    def _check_alive(self) -> None:
+        # For a pane that is gone, tmux prints empty values (exit status 0).
+        result = self.tmux("display-message", "-p", "-t", self.pane, "#{pane_id} #{pane_dead}")
+        if result.stdout.split() != [self.pane, "0"]:
+            raise WeeChatError(f"WeeChat exited: {self.label} (see {self.dir}/stdout.txt)")
+
+    def pane_alive(self) -> bool:
+        try:
+            self._check_alive()
+        except WeeChatError:
+            return False
+        return True
+
+    def process_alive(self) -> bool:
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def stop(self) -> None:
+        """Quit WeeChat, and wait until its process has exited (it writes its
+        configuration files on /quit)."""
+        if self.pane_alive():
+            try:
+                self.send("/quit")
+            except OSError:
+                pass
+        deadline = time.monotonic() + 10
+        while (self.pane_alive() or self.process_alive()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+
+def label_for(build: str, path: str, binary: str) -> str:
+    """Build directory, WeeChat version and the commit it was built from."""
+    text = f"{build}: {version(binary)[0]}"
+    config = Path(path, "config-git.h")
+    if config.is_file():
+        git = config.read_text().split('"')
+        if len(git) > 1 and git[1]:
+            text += f" ({git[1]})"
+    return text
+
+
+def setup(weechat: PaneWeeChat, ircd: FakeIrcd, ansigen: str, server_version) -> None:
+    """Split the WeeChat window: the /exec output on top, and below it the
+    /exec -o output in a channel of the fake IRC server."""
+    for command in ("/set weechat.history.max_buffer_lines_number 0",
+                    '/set weechat.look.buffer_time_format ""',
+                    "/set irc.look.buffer_switch_autojoin off",
+                    "/bar hide buflist",
+                    "/bar hide nicklist",
+                    # Lines of inactive windows would all be gray.
+                    *[f"/set weechat.look.color_inactive_{name} off"
+                      for name in ("buffer", "message", "prefix", "prefix_buffer", "time",
+                                   "window")],
+                    "/set irc.look.server_buffer independent",
+                    "/set irc.server_default.tls off",
+                    f"/server add x 127.0.0.1/{ircd.port}",
+                    "/set irc.server.x.nicks tester",
+                    "/set irc.server.x.autojoin #t"):
+        weechat.send(command)
+    if server_version >= (4, 2):
+        weechat.send("/set irc.server.x.anti_flood 0")
+    else:
+        weechat.send("/set irc.server.x.anti_flood_prio_high 0")
+        weechat.send("/set irc.server.x.anti_flood_prio_low 0")
+    weechat.send("/connect x")
+    if not ircd.joined.wait(30):
+        raise WeeChatError(f"{weechat.label}: did not join #t on the fake IRC server")
+    time.sleep(1)  # Let WeeChat create the channel buffer.
+    shell = f"{shlex.quote(sys.executable)} {ansigen}; echo {shlex.quote(END)}"
+    weechat.send("/buffer clear", buffer="core.weechat")
+    weechat.send(f"/print /exec, {weechat.label}", buffer="core.weechat")
+    weechat.send(f"/print /exec -o, {weechat.label}", buffer="irc.x.#t")
+    weechat.send(f"/exec -norc -sh {shell}", buffer="core.weechat")
+    weechat.send(f"/exec -o -norc -sh {shell}", buffer="irc.x.#t")
+    weechat.send("/window splith 50")
+    weechat.send("/buffer irc.x.#t")
+    weechat.send("/window up")
+    weechat.send("/buffer core.weechat")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     epilog="\n".join(__doc__.splitlines()[2:]))
+    parser.add_argument("--build", action="append", metavar="DIR",
+                        help="WeeChat build directory, repeatable (default: %s, those that exist)"
+                        % ", ".join(DEFAULT_BUILDS))
+    parser.add_argument("--filter", metavar="REGEX", default=DEFAULT_FILTER,
+                        help="cases to show, as for ansigen (default: %(default)s, the "
+                        "hand-written cases)")
+    parser.add_argument("--term", action="append", metavar="TERM",
+                        help="TERM for terminfo cases, repeatable (as for ansigen)")
+    parser.add_argument("--plain", action="store_true",
+                        help="only the case lines, without the comment lines of --eyeball "
+                        "(for pictures made of several lines, like img2txt)")
+    parser.add_argument("--no-attach", action="store_true",
+                        help="do not attach: print the tmux command to attach, and wait")
+    parser.add_argument("--keep", action="store_true", help="keep the WeeChat directories")
+    args = parser.parse_args()
+
+    # (label, path): --build relative to the current directory, the default
+    # builds relative to this repository.
+    builds = ([(build, str(Path(build).resolve())) for build in args.build] if args.build
+              else [(build, str(ROOT / build)) for build in DEFAULT_BUILDS
+                    if (ROOT / build).is_dir()])
+    if not builds:
+        sys.exit("no build directory: pass --build DIR (see the README)")
+    if not shutil.which("tmux"):
+        sys.exit("tmux is needed")
+    ansigen = shlex.join([str(ROOT / "ansigen"), *([] if args.plain else ["--eyeball"]),
+                          "--filter", args.filter,
+                          *[option for term in args.term or [] for option in ("--term", term)]])
+    columns, lines = shutil.get_terminal_size((240, 60))
+
+    # Clean up (in the finally below) when killed or when the terminal closes.
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, lambda *_: sys.exit(1))
+    tmux = Tmux()
+    weechats: list[PaneWeeChat] = []
+    ircds: list[FakeIrcd] = []
+    try:
+        for index, (build, path) in enumerate(builds):
+            headless, libdir = binary_for_build(path)
+            binary = curses_binary_for(headless)
+            if binary is None:
+                sys.exit(f"no curses weechat in {build} (src/gui/curses/normal/weechat)")
+            weechat = PaneWeeChat(tmux, binary, libdir, label_for(build, path, binary), index == 0,
+                                  (columns, lines), args.keep)
+            weechats.append(weechat)
+            weechat.start()
+            if index == 0:
+                for option in (("remain-on-exit", "failed"), ("mouse", "on"),
+                               ("pane-border-status", "top"),
+                               ("pane-border-format", " #{@label} "), ("window-size", "latest")):
+                    tmux("set-option", "-g", *option)
+        tmux("select-layout", "-t", SESSION, "even-horizontal")
+        for weechat in weechats:
+            ircd = FakeIrcd().start()
+            ircds.append(ircd)
+            setup(weechat, ircd, ansigen, version(weechat.binary)[1])
+        tmux("set-option", "-w", "-t", SESSION, "synchronize-panes", "on")
+        tmux("select-pane", "-t", weechats[0].pane)
+
+        attach = ["tmux", "-L", tmux.socket, "attach", "-t", SESSION]
+        if args.no_attach or not sys.stdout.isatty():
+            print(f"attach with: {shlex.join(attach)}  (Ctrl-C here ends the view)", flush=True)
+            while tmux.alive() and any(w.pane_alive() for w in weechats):
+                time.sleep(1)
+        else:
+            env = {key: value for key, value in os.environ.items() if key != "TMUX"}
+            subprocess.run(attach, env=env)
+    except KeyboardInterrupt:
+        pass
+    except WeeChatError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    finally:
+        for ircd in ircds:
+            ircd.stop()
+        for weechat in weechats:
+            weechat.__exit__(None, None, None)
+        tmux("kill-server")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
