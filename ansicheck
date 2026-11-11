@@ -14,8 +14,9 @@ from ansitest import registry  # noqa: E402
 from ansitest.capture.display import run_display  # noqa: E402
 from ansitest.capture.run import run_gui, run_irc, run_print  # noqa: E402
 from ansitest.capture.weechat import (MIN_VERSION, WeeChat, WeeChatError, curses_binary_for,  # noqa: E402
-                                      binary_for_build, version)
+                                      binary_for_build, features, version)
 from ansitest.check import evaluate  # noqa: E402
+from ansitest.project import IRC_COLORS, set_profile  # noqa: E402
 from ansitest.model import BYTE_PATHS, GUI_PATHS, PATHS, path_skip  # noqa: E402
 from ansitest.report import report  # noqa: E402
 
@@ -40,6 +41,10 @@ def main() -> int:
     parser.add_argument("--corpora", metavar="DIR", default=str(registry.DEFAULT_CORPORA))
     parser.add_argument("--verbose", action="store_true",
                         help="list every diverging and skipped case")
+    parser.add_argument("--irc-colors", choices=IRC_COLORS,
+                        help="IRC colors for ANSI colors (option irc.server.*.ansi_colors of "
+                        "WeeChat with the 99 IRC colors): set the option for the irc paths "
+                        "(default: the default value of the WeeChat under test)")
     parser.add_argument("--keep", action="store_true", help="keep WeeChat's directory")
     parser.add_argument("--json", metavar="FILE",
                         help="also write the result of every case and path as JSON to FILE")
@@ -57,6 +62,23 @@ def main() -> int:
             parser.error(f"WeeChat {version_string}: {MIN_VERSION[0]}.{MIN_VERSION[1]} "
                          "or later is required")
         print(f"WeeChat {version_string} ({binary})", flush=True)
+
+        # Features of the WeeChat under test: RGB colors (#rrggbb), IRC colors
+        # used for ANSI colors (option irc.server_default.ansi_colors).
+        with WeeChat(binary, libdir, keep=args.keep) as weechat:
+            found = features(weechat)
+        irc_colors = found["irc_colors"] or "basic"
+        irc_options = []
+        if args.irc_colors:
+            if found["irc_colors"] is None and args.irc_colors != "basic":
+                raise WeeChatError(f"--irc-colors {args.irc_colors}: this WeeChat has no "
+                                   "option irc.server_default.ansi_colors")
+            if found["irc_colors"] is not None:
+                irc_options.append(f"/set irc.server_default.ansi_colors {args.irc_colors}")
+            irc_colors = args.irc_colors
+        set_profile(rgb=found["rgb"], irc_colors=irc_colors)
+        print(f"RGB colors: {'yes' if found['rgb'] else 'no'}, IRC colors for ANSI colors: "
+              f"{irc_colors}", flush=True)
 
         cases = registry.select(registry.all_cases(terms=args.term, corpora=Path(args.corpora)),
                                 args.filter)
@@ -90,7 +112,8 @@ def main() -> int:
                     got = run_gui(weechat, runnable, raw="gui-ansi" not in run_paths
                                   or "gui" in run_paths, color=color)
                 else:
-                    got = run_irc(weechat, runnable, version_number, color=color)
+                    got = run_irc(weechat, runnable, version_number, color=color,
+                                  options=irc_options)
             for path in run_paths:
                 if path in BYTE_PATHS:
                     found = got["bytes"]

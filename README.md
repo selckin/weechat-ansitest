@@ -282,11 +282,24 @@ Each path can show fewer attributes than a terminal, so the expected state
 is first reduced to what the path can represent:
 
 - `gui`, `gui-ansi`: RGB colors become the nearest of 256 colors (WeeChat's
-  own table and algorithm, copied by `tools/extract_tables.py`); no
-  strikethrough.
+  own table and algorithm, copied by `tools/extract_tables.py`), or stay RGB
+  colors with a WeeChat that has RGB colors ([#2375](https://github.com/weechat/weechat/pull/2375):
+  `\x19F@#rrggbb` in the buffer line); no strikethrough.
 - `irc`: colors become IRC colors 0-15 through WeeChat's tables; no dim and
   no blink; bold is shown only without dim, because WeeChat sends SGR 2 as
-  "remove bold".
+  "remove bold". With a WeeChat that has the server option
+  `irc.server.*.ansi_colors`, terminal colors 16-255 and RGB colors follow its
+  value: `extended` (IRC colors 16-98: the IRC color displayed with the terminal
+  color, or the nearest one by RGB value) or `rgb` (RGB colors as IRC hex colors
+  `^Drrggbb`); the RGB values of IRC colors 16-98 come from the
+  [IRC formatting specification](https://modern.ircdocs.horse/formatting#colors-16-98)
+  (`ansitest/irc99.py`), not from WeeChat. Terminal colors 0-15 are always IRC
+  colors 0-15.
+
+Before running the cases, `ansicheck` detects these features of the WeeChat
+under test (RGB colors are accepted in a color option; value of
+`irc.server_default.ansi_colors`) and prints them, for example
+`RGB colors: yes, IRC colors for ANSI colors: extended`.
 
 Input that is already formatted for IRC (`toilet --irc`, `img2txt -f irc`, cases
 `hw/irc-format/*`)
@@ -321,7 +334,8 @@ reference) is reported as a failure, so the list cannot go stale.
 
 ```
 ./ansicheck --build DIR | --weechat BIN [--path all|gui|gui-ansi|irc|gui-strip|irc-strip|gui-keep|irc-keep|print|display|display-headless]
-            [--filter REGEX] [--term TERM]... [--corpora DIR] [--verbose] [--keep]
+            [--filter REGEX] [--term TERM]... [--corpora DIR] [--irc-colors basic|extended|rgb]
+            [--verbose] [--keep]
 ```
 
 - `--build DIR`: a WeeChat build directory
@@ -332,6 +346,9 @@ reference) is reported as a failure, so the list cannot go stale.
   matches, e.g. `--filter 'hw/noise/'` or `--filter 'ti/xterm-direct/'`, with
   the input, expected result and result of each one (passing or not).
 - `--term TERM`: TERMs for the terminfo cases (repeatable).
+- `--irc-colors basic|extended|rgb`: set `irc.server_default.ansi_colors` for the
+  irc paths (only with a WeeChat that has this option; default: its default
+  value), to check each value.
 - `--verbose`: also list every diverging and skipped case.
 - `--keep`: keep WeeChat's temporary directory (logs, stdout) for debugging.
 - `--json FILE`: also write the status of every case and path as JSON.
@@ -445,6 +462,7 @@ tools/compare.py          compare two ansicheck --json results
 ansitest/model.py         attribute state, cases, skip rules
 ansitest/sgr.py           escape sequence tokenizer and reference SGR model
 ansitest/tables*.py       WeeChat's color tables and conversions
+ansitest/irc99.py         RGB values of IRC colors 16-98 (IRC formatting specification)
 ansitest/project.py       reference state reduced to what each path shows
 ansitest/cases/           terminfo, hand-written, program, libvterm and ansi-regex cases
 ansitest/ti_dump.py       dump one TERM's capabilities (one process per TERM)

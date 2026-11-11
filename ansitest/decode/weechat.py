@@ -6,7 +6,8 @@ writes are accepted, read the way the curses display reads them
 
 - \\x19F[flags]NN       foreground, basic WeeChat color NN (00-16)
 - \\x19F@[flags]NNNNN   foreground, terminal color NNNNN
-- \\x19BNN, \\x19B@NNNNN background
+- \\x19F@[flags]#rrggbb foreground, RGB color (WeeChat with RGB colors)
+- \\x19BNN, \\x19B@NNNNN, \\x19B@#rrggbb background
 - \\x1aA, \\x1bA         set, remove attribute A (\\x01-\\x06)
 - \\x1c                 reset colors and attributes
 
@@ -48,8 +49,10 @@ ATTRS = ("bold", "dim", "italic", "underline", "blink", "reverse")
 CODE_BYTES = b"\x19\x1a\x1b\x1c"
 
 _FG_EXTENDED = re.compile(rb"\x19F@([%.*!/_|]*)([0-9]{5})")
+_FG_RGB = re.compile(rb"\x19F@([%.*!/_|]*)#([0-9a-fA-F]{6})")
 _FG_BASIC = re.compile(rb"\x19F([%.*!/_|]*)([0-9]{2})")
 _BG_EXTENDED = re.compile(rb"\x19B@([0-9]{5})")
+_BG_RGB = re.compile(rb"\x19B@#([0-9a-fA-F]{6})")
 _BG_BASIC = re.compile(rb"\x19B([0-9]{2})")
 _ATTR = re.compile(rb"([\x1a\x1b])([\x01-\x06])")
 
@@ -109,10 +112,14 @@ def decode_weechat_chars(message) -> list[tuple[str, dict]]:
             continue
         if (match := _FG_EXTENDED.match(data, i)):
             _apply_fg(state, match.group(1), int(match.group(2)))
+        elif (match := _FG_RGB.match(data, i)):
+            _apply_fg(state, match.group(1), "#" + match.group(2).decode().lower())
         elif (match := _FG_BASIC.match(data, i)) and int(match.group(2)) < len(BASIC):
             _apply_fg(state, match.group(1), _basic(int(match.group(2))))
         elif (match := _BG_EXTENDED.match(data, i)):
             state["bg"] = int(match.group(1))
+        elif (match := _BG_RGB.match(data, i)):
+            state["bg"] = "#" + match.group(1).decode().lower()
         elif (match := _BG_BASIC.match(data, i)) and int(match.group(1)) < len(BASIC):
             state["bg"] = _basic(int(match.group(1)))
         elif (match := _ATTR.match(data, i)):

@@ -167,6 +167,41 @@ class WeeChat:
             time.sleep(0.2)
 
 
+FEATURES_MARKER = "ansitest-features"
+FEATURE_COMMANDS = (
+    # Accepted only by a WeeChat with RGB colors (PR #2375).
+    "/set weechat.color.chat_nick_self #ff8800",
+    "/unset weechat.color.chat_nick_self",
+    # IRC colors used for ANSI colors (option added with the 99 IRC colors;
+    # the expression is empty if the option does not exist).
+    "/eval /print -core ansitest-irc-colors=${irc.server_default.ansi_colors}",
+    f"/print -core {FEATURES_MARKER}",
+)
+
+
+def parse_features(lines) -> dict:
+    """Features of WeeChat from the core log after FEATURE_COMMANDS:
+    "rgb" (RGB colors in color options) and "irc_colors" (value of option
+    irc.server_default.ansi_colors, None if the option does not exist)."""
+    text = [plain(line) for line in lines]
+    rgb = any("weechat.color.chat_nick_self = #ff8800" in line for line in text)
+    irc_colors = None
+    for line in text:
+        match = re.search(r"ansitest-irc-colors=(\w+)", line)
+        if match:
+            irc_colors = match.group(1)
+    return {"rgb": rgb, "irc_colors": irc_colors}
+
+
+def features(weechat: "WeeChat", timeout: float = 30.0) -> dict:
+    """Detect features of a running WeeChat (see parse_features)."""
+    for command in FEATURE_COMMANDS:
+        weechat.send(command)
+    lines = weechat.wait_log(
+        lambda lines: any(FEATURES_MARKER in plain(line) for line in lines), timeout)
+    return parse_features(lines)
+
+
 class TmuxWeeChat(WeeChat):
     """The curses WeeChat in a detached tmux session (its own tmux server),
     with the given TERM; capture() returns what the screen shows."""

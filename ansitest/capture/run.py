@@ -87,7 +87,7 @@ def run_gui(weechat: WeeChat, cases, raw: bool = True, color: str = "auto") -> d
 
 
 def run_irc(weechat: WeeChat, cases, version: tuple[int, int],
-            color: str = "auto") -> dict[str, dict]:
+            color: str = "auto", options=()) -> dict[str, dict]:
     """/exec -o -color <color> on a channel of the fake IRC server. Return
     "irc": the decoded PRIVMSG texts, and "bytes": their raw bytes after the
     ID."""
@@ -105,6 +105,7 @@ def run_irc(weechat: WeeChat, cases, version: tuple[int, int],
         else:
             commands += ["/set irc.server.x.anti_flood_prio_high 0",
                          "/set irc.server.x.anti_flood_prio_low 0"]
+        commands += list(options)
         commands.append("/connect x")
         for command in commands:
             weechat.send(command)

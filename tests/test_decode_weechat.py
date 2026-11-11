@@ -2,7 +2,7 @@ import unittest
 
 from ansitest.decode.weechat import decode_raw_line, decode_weechat, decode_weechat_chars
 from ansitest.model import State
-from ansitest.project import project
+from ansitest.project import project, set_profile
 
 
 def gui(**changes):
@@ -28,6 +28,17 @@ class WeechatDecodeTest(unittest.TestCase):
 
     def test_extended_colors(self):
         self.assertEqual(self.states("\x19F@|00196\x19B@00021a"), [gui(fg=196, bg=21)])
+
+    def test_rgb_colors(self):
+        # WeeChat with RGB colors: "@#rrggbb" (any case) instead of "@NNNNN".
+        set_profile(rgb=True)
+        try:
+            self.assertEqual(self.states("\x19F@|#FF8800\x19B@#000080a"),
+                             [gui(fg="#ff8800", bg="#000080")])
+            self.assertEqual(self.states("\x1a\x01\x19F@#ff8800a\x1a\x01\x19F@*|#ff8800b"),
+                             [gui(fg="#ff8800"), gui(fg="#ff8800", bold=True)])
+        finally:
+            set_profile()
 
     def test_color_without_keep_flag_resets_attributes(self):
         self.assertEqual(self.states("\x1a\x01\x1a\x03\x19F|03a\x19F00b"),

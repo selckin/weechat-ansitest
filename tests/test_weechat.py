@@ -5,8 +5,9 @@ import re
 import unittest
 
 from ansitest.capture.run import run_gui, run_irc
-from ansitest.capture.weechat import MIN_VERSION, WeeChat, binary_for_build, version
+from ansitest.capture.weechat import MIN_VERSION, WeeChat, binary_for_build, features, version
 from ansitest.check import evaluate
+from ansitest.project import set_profile
 from ansitest.model import GUI_PATHS, RESET, State, build_case
 from ansitest.sgr import plain
 from ansitest.tables import TERM256, rgb_to_term
@@ -32,6 +33,17 @@ class WeeChatTest(unittest.TestCase):
         self.version = version(self.binary)[1]
         if self.version < MIN_VERSION:
             self.skipTest(f"WeeChat {self.version} is older than {MIN_VERSION}")
+        # Expected results for the features of this WeeChat, like ansicheck.
+        with WeeChat(self.binary, self.libdir) as weechat:
+            found = features(weechat)
+        set_profile(rgb=found["rgb"], irc_colors=found["irc_colors"] or "basic")
+        self.addCleanup(set_profile)
+
+    def test_features(self):
+        with WeeChat(self.binary, self.libdir) as weechat:
+            found = features(weechat)
+        self.assertIsInstance(found["rgb"], bool)
+        self.assertIn(found["irc_colors"], (None, "basic", "extended", "rgb"))
 
     def test_gui(self):
         cases = sample_cases()
